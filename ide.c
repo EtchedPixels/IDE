@@ -625,21 +625,24 @@ void ide_write8(struct ide_controller *c, uint8_t r, uint8_t v)
       t->lba3 = v;
       break;
     case ide_lba_top:
-      t->lba4 = v & (DEVH_HEAD|DEVH_DEV|DEVH_LBA);
       c->selected = (v & DEVH_DEV) ? 1 : 0;
+      c->drive[c->selected].taskfile.lba4 = v & (DEVH_HEAD|DEVH_DEV|DEVH_LBA);
       break;
     case ide_command_w:
       t->command = v; 
       ide_issue_command(t);
       break;
     case ide_devctrl_w:
+      /* ATA: "When the Device Control register is written, both devices
+         respond to the write regardless of which device is selected" */
       if ((v ^ t->devctrl) & DCL_SRST) {
         if (v & DCL_SRST)
           ide_srst_begin(c);
         else
           ide_srst_end(c);
       }
-      t->devctrl = v;	/* Check versus real h/w does this end up cleared */
+      c->drive[0].taskfile.devctrl = v;	/* Check versus real h/w does this end up cleared */
+      c->drive[1].taskfile.devctrl = v;
       break;
   }
 }
