@@ -1,6 +1,6 @@
-diff -u --new-file --recursive xroar-0.33.2/src/cart.c xroar-0.33.2-ide/src/cart.c
---- xroar-0.33.2/src/cart.c	2015-05-24 10:06:51.000000000 +0100
-+++ xroar-0.33.2-ide/src/cart.c	2016-12-04 13:13:05.070893186 +0000
+diff -u --new-file --recursive xroar-0.33.2.vanilla/src/cart.c xroar-0.33.2/src/cart.c
+--- xroar-0.33.2.vanilla/src/cart.c	2015-05-24 10:06:51.000000000 +0100
++++ xroar-0.33.2/src/cart.c	2017-04-22 09:34:35.445701191 +0100
 @@ -34,6 +34,7 @@
  #include "deltados.h"
  #include "dragondos.h"
@@ -25,9 +25,9 @@ diff -u --new-file --recursive xroar-0.33.2/src/cart.c xroar-0.33.2-ide/src/cart
  	}
  	if (c && c->attach)
  		c->attach(c);
-diff -u --new-file --recursive xroar-0.33.2/src/cart.h xroar-0.33.2-ide/src/cart.h
---- xroar-0.33.2/src/cart.h	2015-05-24 10:06:51.000000000 +0100
-+++ xroar-0.33.2-ide/src/cart.h	2016-12-04 13:13:05.071893207 +0000
+diff -u --new-file --recursive xroar-0.33.2.vanilla/src/cart.h xroar-0.33.2/src/cart.h
+--- xroar-0.33.2.vanilla/src/cart.h	2015-05-24 10:06:51.000000000 +0100
++++ xroar-0.33.2/src/cart.h	2017-04-22 09:34:35.445701191 +0100
 @@ -22,6 +22,7 @@
  	CART_DELTADOS = 3,
  	CART_ORCH90 = 4,
@@ -36,10 +36,10 @@ diff -u --new-file --recursive xroar-0.33.2/src/cart.h xroar-0.33.2-ide/src/cart
  };
  
  struct cart_config {
-diff -u --new-file --recursive xroar-0.33.2/src/ide.c xroar-0.33.2-ide/src/ide.c
---- xroar-0.33.2/src/ide.c	1970-01-01 01:00:00.000000000 +0100
-+++ xroar-0.33.2-ide/src/ide.c	2016-12-04 13:15:16.264728349 +0000
-@@ -0,0 +1,876 @@
+diff -u --new-file --recursive xroar-0.33.2.vanilla/src/ide.c xroar-0.33.2/src/ide.c
+--- xroar-0.33.2.vanilla/src/ide.c	1970-01-01 01:00:00.000000000 +0100
++++ xroar-0.33.2/src/ide.c	2017-04-22 09:34:44.706891567 +0100
+@@ -0,0 +1,879 @@
 +/*
 + *	IDE Emulation Layer for retro-style PIO interfaces
 + *
@@ -667,21 +667,24 @@ diff -u --new-file --recursive xroar-0.33.2/src/ide.c xroar-0.33.2-ide/src/ide.c
 +      t->lba3 = v;
 +      break;
 +    case ide_lba_top:
-+      t->lba4 = v & (DEVH_HEAD|DEVH_DEV|DEVH_LBA);
 +      c->selected = (v & DEVH_DEV) ? 1 : 0;
++      c->drive[c->selected].taskfile.lba4 = v & (DEVH_HEAD|DEVH_DEV|DEVH_LBA);
 +      break;
 +    case ide_command_w:
 +      t->command = v; 
 +      ide_issue_command(t);
 +      break;
 +    case ide_devctrl_w:
++      /* ATA: "When the Device Control register is written, both devices
++         respond to the write regardless of which device is selected" */
 +      if ((v ^ t->devctrl) & DCL_SRST) {
 +        if (v & DCL_SRST)
 +          ide_srst_begin(c);
 +        else
 +          ide_srst_end(c);
 +      }
-+      t->devctrl = v;	/* Check versus real h/w does this end up cleared */
++      c->drive[0].taskfile.devctrl = v;	/* Check versus real h/w does this end up cleared */
++      c->drive[1].taskfile.devctrl = v;
 +      break;
 +  }
 +}
@@ -916,9 +919,9 @@ diff -u --new-file --recursive xroar-0.33.2/src/ide.c xroar-0.33.2-ide/src/ide.c
 +      return -1;  
 +  return 0;
 +}
-diff -u --new-file --recursive xroar-0.33.2/src/idecart.c xroar-0.33.2-ide/src/idecart.c
---- xroar-0.33.2/src/idecart.c	1970-01-01 01:00:00.000000000 +0100
-+++ xroar-0.33.2-ide/src/idecart.c	2016-12-04 13:13:05.072893229 +0000
+diff -u --new-file --recursive xroar-0.33.2.vanilla/src/idecart.c xroar-0.33.2/src/idecart.c
+--- xroar-0.33.2.vanilla/src/idecart.c	1970-01-01 01:00:00.000000000 +0100
++++ xroar-0.33.2/src/idecart.c	2017-04-22 09:34:35.458701458 +0100
 @@ -0,0 +1,210 @@
 +/*  Copyright 2015 Alan Cox
 + *
@@ -1130,9 +1133,9 @@ diff -u --new-file --recursive xroar-0.33.2/src/idecart.c xroar-0.33.2-ide/src/i
 +  idecart_init(ide);
 +  return &ide->cart;
 +}
-diff -u --new-file --recursive xroar-0.33.2/src/idecart.h xroar-0.33.2-ide/src/idecart.h
---- xroar-0.33.2/src/idecart.h	1970-01-01 01:00:00.000000000 +0100
-+++ xroar-0.33.2-ide/src/idecart.h	2016-12-04 13:13:05.072893229 +0000
+diff -u --new-file --recursive xroar-0.33.2.vanilla/src/idecart.h xroar-0.33.2/src/idecart.h
+--- xroar-0.33.2.vanilla/src/idecart.h	1970-01-01 01:00:00.000000000 +0100
++++ xroar-0.33.2/src/idecart.h	2017-04-22 09:34:35.459701479 +0100
 @@ -0,0 +1,14 @@
 +/*  XRoar - a Dragon/Tandy Coco emulator
 + *  Copyright (C) 2003-2015  Ciaran Anscomb
@@ -1148,9 +1151,9 @@ diff -u --new-file --recursive xroar-0.33.2/src/idecart.h xroar-0.33.2-ide/src/i
 +struct cart *idecart_new(struct cart_config *cc);
 +
 +#endif  /* XROAR_IDECART_H_ */
-diff -u --new-file --recursive xroar-0.33.2/src/ide.h xroar-0.33.2-ide/src/ide.h
---- xroar-0.33.2/src/ide.h	1970-01-01 01:00:00.000000000 +0100
-+++ xroar-0.33.2-ide/src/ide.h	2016-12-04 13:13:05.072893229 +0000
+diff -u --new-file --recursive xroar-0.33.2.vanilla/src/ide.h xroar-0.33.2/src/ide.h
+--- xroar-0.33.2.vanilla/src/ide.h	1970-01-01 01:00:00.000000000 +0100
++++ xroar-0.33.2/src/ide.h	2017-04-22 09:34:35.459701479 +0100
 @@ -0,0 +1,80 @@
 +#include <stdint.h>
 +
@@ -1232,9 +1235,9 @@ diff -u --new-file --recursive xroar-0.33.2/src/ide.h xroar-0.33.2-ide/src/ide.h
 +void ide_free(struct ide_controller *c);
 +
 +int ide_make_drive(uint8_t type, int fd);
-diff -u --new-file --recursive xroar-0.33.2/src/Makefile.am xroar-0.33.2-ide/src/Makefile.am
---- xroar-0.33.2/src/Makefile.am	2015-05-24 10:06:51.000000000 +0100
-+++ xroar-0.33.2-ide/src/Makefile.am	2016-12-04 13:13:05.073893251 +0000
+diff -u --new-file --recursive xroar-0.33.2.vanilla/src/Makefile.am xroar-0.33.2/src/Makefile.am
+--- xroar-0.33.2.vanilla/src/Makefile.am	2015-05-24 10:06:51.000000000 +0100
++++ xroar-0.33.2/src/Makefile.am	2017-04-22 09:34:35.459701479 +0100
 @@ -31,6 +31,8 @@
  	fs.c fs.h \
  	hd6309.c hd6309.h \
@@ -1244,9 +1247,9 @@ diff -u --new-file --recursive xroar-0.33.2/src/Makefile.am xroar-0.33.2-ide/src
  	joystick.c joystick.h \
  	keyboard.c keyboard.h \
  	logging.c logging.h \
-diff -u --new-file --recursive xroar-0.33.2/src/xroar.c xroar-0.33.2-ide/src/xroar.c
---- xroar-0.33.2/src/xroar.c	2015-05-24 10:06:51.000000000 +0100
-+++ xroar-0.33.2-ide/src/xroar.c	2016-12-04 13:13:05.074893272 +0000
+diff -u --new-file --recursive xroar-0.33.2.vanilla/src/xroar.c xroar-0.33.2/src/xroar.c
+--- xroar-0.33.2.vanilla/src/xroar.c	2015-05-24 10:06:51.000000000 +0100
++++ xroar-0.33.2/src/xroar.c	2017-04-22 09:34:35.460701499 +0100
 @@ -299,6 +299,12 @@
  	"cart mpi",
  	"cart-desc Multi-Pak Interface",
@@ -1260,9 +1263,9 @@ diff -u --new-file --recursive xroar-0.33.2/src/xroar.c xroar-0.33.2-ide/src/xro
  
  	// ROM lists
  
-diff -u --new-file --recursive xroar-0.33.2/tools/makedisk.c xroar-0.33.2-ide/tools/makedisk.c
---- xroar-0.33.2/tools/makedisk.c	1970-01-01 01:00:00.000000000 +0100
-+++ xroar-0.33.2-ide/tools/makedisk.c	2016-12-04 13:13:57.728031133 +0000
+diff -u --new-file --recursive xroar-0.33.2.vanilla/tools/makedisk.c xroar-0.33.2/tools/makedisk.c
+--- xroar-0.33.2.vanilla/tools/makedisk.c	1970-01-01 01:00:00.000000000 +0100
++++ xroar-0.33.2/tools/makedisk.c	2017-04-22 09:34:35.460701499 +0100
 @@ -0,0 +1,29 @@
 +#include <stdio.h>
 +#include <stdlib.h>
