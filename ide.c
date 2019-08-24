@@ -1,7 +1,7 @@
 /*
  *	IDE Emulation Layer for retro-style PIO interfaces
  *
- *	(c) Copyright Alan Cox, 2015
+ *	(c) Copyright Alan Cox, 2015-2019
  *
  *	IDE-emu is free software: you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -108,6 +108,7 @@ static void hexdump(uint8_t *bp)
   }
 }
 
+/* FIXME: use proper endian convertors! */
 static uint16_t le16(uint16_t v)
 {
   uint8_t *p = (uint8_t *)&v;
@@ -136,6 +137,8 @@ static void ide_fault(struct ide_drive *d, const char *p)
 static off_t xlate_block(struct ide_taskfile *t)
 {
   struct ide_drive *d = t->drive;
+  uint16_t cyl;
+
   if (t->lba4 & DEVH_LBA) {
 /*    fprintf(stderr, "XLATE LBA %02X:%02X:%02X:%02X\n", 
       t->lba4, t->lba3, t->lba2, t->lba1);*/
@@ -143,7 +146,22 @@ static off_t xlate_block(struct ide_taskfile *t)
       return 2 + (((t->lba4 & DEVH_HEAD) << 24) | (t->lba3 << 16) | (t->lba2 << 8) | t->lba1);
     ide_fault(d, "LBA on non LBA drive");
   }
-  return 2 + (((t->lba4 & DEVH_HEAD) * d->cylinders + ((t->lba3 << 8) + t->lba2)) * d->sectors + t->lba1);
+
+  /* Some well known software asks for 0/0/0 when it means 0/0/1. Drives appear
+     to interpret sector 0 as sector 1 */
+  if (t->lba1 == 0) {
+    fprintf(stderr, "[Bug: request for sector offset 0].\n");
+    t->lba1 = 1;
+  }
+  cyl = (t->lba3 << 8) | t->lba2;
+  /* fprintf(stderr, "(H %d C %d S %d)\n", t->lba4 & DEVH_HEAD, cyl, t->lba1); */
+  if (t->lba1 == 0 || t->lba1 > d->sectors || t->lba4 >= d->heads || cyl >= d->cylinders) {
+    return -1;
+  }
+  /* Sector 1 is first */
+  /* Images generally go cylinder/head/sector. This also matters if we ever
+     implement more advanced geometry setting */
+  return 1 + ((cyl * d->heads) + (t->lba4 & DEVH_HEAD)) * d->sectors + t->lba1;
 }
 
 /* Indicate the drive is ready */
@@ -173,7 +191,9 @@ static void data_in_state(struct ide_taskfile *tf)
   struct ide_drive *d = tf->drive;
   d->state = IDE_DATA_IN;
   d->dptr = d->data + 512;
-  tf->status &= ~ (ST_BSY|ST_DRDY);
+  /* We don't clear DRDY here, drives may well accept a command at this
+     point and at least one firmware for RC2014 assumes this */
+  tf->status &= ~ST_BSY;
   tf->status |= ST_DRQ;
   d->intrq = 1;			/* Double check */
 }
@@ -266,10 +286,12 @@ static void cmd_initparam_complete(struct ide_taskfile *tf)
 {
   struct ide_drive *d = tf->drive;
   /* We only support the current mapping */
-  if (tf->count != d->sectors || (tf->lba4 & DEVH_HEAD) != d->heads) {
+  if (tf->count != d->sectors || (tf->lba4 & DEVH_HEAD) + 1 != d->heads) {
     tf->status |= ST_ERR;
     tf->error |= ERR_ABRT;
     tf->drive->failed = 1;		/* Report ID NF until fixed */
+/*    fprintf(stderr, "geo is %d %d, asked for %d %d\n",
+      d->sectors, d->heads, tf->count, (tf->lba4 & DEVH_HEAD) + 1); */
     ide_fault(d, "invalid geometry");
   } else if (tf->drive->failed == 1)
     tf->drive->failed = 0;		/* Valid translation */
@@ -285,12 +307,16 @@ static void cmd_readsectors_complete(struct ide_taskfile *tf)
     return;
   }
   d->offset = xlate_block(tf);
-  tf->status |= ST_DRQ;
+  /* DRDY is not guaranteed here but at least one buggy RC2014 firmware
+     expects it */
+  tf->status |= ST_DRQ | ST_DSC | ST_DRDY;
+  tf->status &= ~ST_BSY;
   /* 0 = 256 sectors */
   d->length = tf->count ? tf->count : 256;
-/*  fprintf(stderr, "READ %d SECTORS @ %ld\n", d->length, d->offset);  */
+  /* fprintf(stderr, "READ %d SECTORS @ %ld\n", d->length, d->offset); */
   if (d->offset == -1 ||  lseek(d->fd, 512 * d->offset, SEEK_SET) == -1) {
     tf->status |= ST_ERR;
+    tf->status &= ~ST_DSC;
     tf->error |= ERR_IDNF;
     /* return null data */
     completed(tf);
@@ -311,10 +337,12 @@ static void cmd_verifysectors_complete(struct ide_taskfile *tf)
   d->offset = xlate_block(tf);
   /* 0 = 256 sectors */
   d->length = tf->count ? tf->count : 256;
-  if (lseek(d->fd, 512 * (d->offset + d->length - 1), SEEK_SET) == -1) {
+  if (d->offset == -1 || lseek(d->fd, 512 * (d->offset + d->length - 1), SEEK_SET) == -1) {
+    tf->status &= ~ST_DSC;
     tf->status |= ST_ERR;
     tf->error |= ERR_IDNF;
   }
+  tf->status |= ST_DSC;
   completed(tf);
 }
 
@@ -323,10 +351,12 @@ static void cmd_recalibrate_complete(struct ide_taskfile *tf)
   struct ide_drive *d = tf->drive;
   if (d->failed)
     drive_failed(tf);
-  if (xlate_block(tf) != 0L) {
+  if (d->offset == -1 || xlate_block(tf) != 0L) {
+    tf->status &= ~ST_DSC;
     tf->status |= ST_ERR;
     tf->error |= ERR_ABRT;
   }
+  tf->status |= ST_DSC;
   completed(tf);
 }
 
@@ -337,9 +367,11 @@ static void cmd_seek_complete(struct ide_taskfile *tf)
     drive_failed(tf);
   d->offset = xlate_block(tf);
   if (d->offset == -1 || lseek(d->fd, 512 * d->offset, SEEK_SET) == -1) {
+    tf->status &= ~ST_DSC;
     tf->status |= ST_ERR;
     tf->error |= ERR_IDNF;
   }
+  tf->status |= ST_DSC;
   completed(tf);
 }
 
@@ -383,6 +415,7 @@ static void cmd_writesectors_complete(struct ide_taskfile *tf)
   if (d->offset == -1 ||  lseek(d->fd, 512 * d->offset, SEEK_SET) == -1) {
     tf->status |= ST_ERR;
     tf->error |= ERR_IDNF;
+    tf->status &= ~ST_DSC;
     /* return null data */
     completed(tf);
     return;
@@ -422,6 +455,7 @@ static int ide_read_sector(struct ide_drive *d)
   if ((len = read(d->fd, d->data, 512)) != 512) {
     perror("ide_read_sector");
     d->taskfile.status |= ST_ERR;
+    d->taskfile.status &= ~ST_DSC;
     ide_xlate_errno(&d->taskfile, len);
     return -1;
   }
@@ -437,6 +471,7 @@ static int ide_write_sector(struct ide_drive *d)
   d->dptr = d->data;
   if ((len = write(d->fd, d->data, 512)) != 512) {
     d->taskfile.status |= ST_ERR;
+    d->taskfile.status &= ~ST_DSC;
     ide_xlate_errno(&d->taskfile, len);
     return -1;
   }
@@ -502,6 +537,7 @@ static void ide_data_out(struct ide_drive *d, uint16_t v, int len)
       d->intrq = 1;
       if (d->length == 0) {
         d->state = IDE_IDLE;
+        d->taskfile.status |= ST_DSC;
         completed(&d->taskfile);
       }
     }
@@ -625,21 +661,24 @@ void ide_write8(struct ide_controller *c, uint8_t r, uint8_t v)
       t->lba3 = v;
       break;
     case ide_lba_top:
-      t->lba4 = v & (DEVH_HEAD|DEVH_DEV|DEVH_LBA);
       c->selected = (v & DEVH_DEV) ? 1 : 0;
+      c->drive[c->selected].taskfile.lba4 = v & (DEVH_HEAD|DEVH_DEV|DEVH_LBA);
       break;
     case ide_command_w:
       t->command = v; 
       ide_issue_command(t);
       break;
     case ide_devctrl_w:
+      /* ATA: "When the Device Control register is written, both devices
+         respond to the write regardless of which device is selected" */
       if ((v ^ t->devctrl) & DCL_SRST) {
         if (v & DCL_SRST)
           ide_srst_begin(c);
         else
           ide_srst_end(c);
       }
-      t->devctrl = v;	/* Check versus real h/w does this end up cleared */
+      c->drive[0].taskfile.devctrl = v;	/* Check versus real h/w does this end up cleared */
+      c->drive[1].taskfile.devctrl = v;
       break;
   }
 }
@@ -713,6 +752,9 @@ int ide_attach(struct ide_controller *c, int drive, int fd)
   }
   d->fd = fd;
   d->present = 1;
+  d->heads = d->identify[3];
+  d->sectors = d->identify[6];
+  d->cylinders = le16(d->identify[1]);
   if (d->identify[49] & le16(1 << 9))
     d->lba = 1;
   else
@@ -853,6 +895,22 @@ int ide_make_drive(uint8_t type, int fd)
       make_ascii(ident + 23, "A001.001", 8);
       make_ascii(ident + 27, "ACME COYOTE v0.1", 40);
       break;  
+    case ACME_ACCELLERATTI:
+      c = 1024;
+      h = 16;
+      s = 16;
+      ident[49] = le16(1 << 9); /* LBA */
+      make_ascii(ident + 23, "A001.001", 8);
+      make_ascii(ident + 27, "ACME ACCELLERATTI INCREDIBILUS v0.1", 40);
+      break;
+    case ACME_ZIPPIBUS:
+      c = 1024;
+      h = 16;
+      s = 32;
+      ident[49] = le16(1 << 9); /* LBA */
+      make_ascii(ident + 23, "A001.001", 8);
+      make_ascii(ident + 27, "ACME ZIPPIBUS v0.1", 40);
+      break;
   }
   ident[1] = le16(c);
   ident[3] = le16(h);

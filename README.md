@@ -14,6 +14,8 @@ Tool for creating disk images
 
 #ide-patch-coco-xroar
 
+(Now part of xroar instead)
+
 Patch to xroar-0.33.2 to add basic support for IDE cartridges. Use with
 -default-machine coco -cart ide -cart-rom hdblba13.rom
 
